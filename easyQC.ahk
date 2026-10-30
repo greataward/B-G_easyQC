@@ -14,8 +14,8 @@ WINDOW_Y := devMode ? 160 : 0
 FONT_SIZE := 14
 TAB_FONT_SIZE := 10
 DEFAULT_TAB := devMode ? 3 : 1
-tabTitles := [ "Main", "Samples", "Label", "Settings"]
-tabStatusMessages := ["Press ctrl+1 to output values", "Press ctrl+2 to output values, w/ blank upc", "", ""]
+tabTitles := [ "Main", "Samples", "Label", "Cores", "Settings"]
+tabStatusMessages := ["Press ctrl+1 to output values", "Press ctrl+2 to output values, w/ blank upc", "", "Load a log sheet from Excel", ""]
 ; COLORS
 PALE_BLUE := "eef2ff"
 NAVY_BLUE := "4d6d9a"
@@ -131,8 +131,33 @@ paths := {
 }
 setupForIni(paths, "paths")
 
+; core labels: rolls are read from the log sheet's config!D24# list (order, upc, roll, qty)
+coreData := {
+	initials: { value: "" },
+	delay: { value: 1500 }, ; ms to wait after a logo click before writing the next roll
+	logoExe: { value: "" },
+	logoClass: { value: "" },
+	logoX1: { value: "" },
+	logoY1: { value: "" },
+	logoX2: { value: "" },
+	logoY2: { value: "" },
+}
+setupForIni(coreData, "cores")
+
+cores := {
+	rows: [],      ; { order, upc, roll, qty, key }
+	order: "",
+	customer: "",
+	current: 0,    ; row whose values are in the csv, waiting for a logo click
+	sentStack: [], ; rows sent this run, for the back button
+	paused: false,
+	pendingClick: false,
+	logoStep: 0,
+	logoCountdown: 0,
+}
+
 csv := { }
-defaultButtons := [{}, {}, {}, {}]
+defaultButtons := [{}, {}, {}, {}, {}]
 
 history := { index: { value: 0} }
 Loop 10 {
@@ -159,7 +184,8 @@ Tab := setupTabs()
 setupMainTab(1)
 setupSamplesTab(2)
 setupLabelTab(3)
-setupSettingsTab(4)
+setupCoresTab(4)
+setupSettingsTab(5)
 onTabChange(Tab)
 
 myGui.OnEvent("Close", (*) => ExitApp)
@@ -338,6 +364,11 @@ onTabChange(tabObj) {
 	statusBar.SetText(tabStatusMessages[tabObj.Value])
 	tabNum := tabObj.value
 	defaultButtons[tabNum].Opt("+Default")
+
+	if (tabNum == cores.tabNum) {
+		refreshCoreWorkbooks()
+		updateCoresStatus()
+	}
 }
 
 clearItems(items) {
@@ -403,7 +434,7 @@ setupGuiAppearance() {
 
 setupTabs() {
 	myGui.SetFont("s" . TAB_FONT_SIZE)
-	Tab := myGui.AddTab3("-wrap choose" . DEFAULT_TAB, ["Main", "Samples", "Label", "Settings"])
+	Tab := myGui.AddTab3("-wrap choose" . DEFAULT_TAB, tabTitles)
 	myGui.SetFont("s" . FONT_SIZE)
 
 	Tab.OnEvent("Change", (*) => onTabChange(Tab))
@@ -665,6 +696,53 @@ setupLabelTab(tabNum) {
 	for key, item in labelData.OwnProps() {
 		updateItemBg(item)
 	}
+}
+
+setupCoresTab(tabNum) {
+	Tab.UseTab(tabNum)
+	cores.tabNum := tabNum
+	myGui.MarginY := 6
+	myGui.SetFont("s10")
+
+	; ==== LOG SHEET ====
+	myGui.AddGroupBox("w330 h58 cGray Section", "log sheet")
+	cores.workbookGui := myGui.AddDropDownList("xs+10 ys+22 w205")
+	refreshButton := myGui.AddButton("x+5 yp-1 w30 h26 -TabStop", "↻")
+	refreshButton.SetFont(, "Segoe UI Symbol")
+	refreshButton.OnEvent("Click", refreshCoreWorkbooks)
+	loadButton := myGui.AddButton("x+5 yp w65 h26 -TabStop", "load")
+	loadButton.OnEvent("Click", onCoresLoad)
+
+	; ==== ROLLS ====
+	myGui.AddGroupBox("xs w330 h238 cBlue Section", "rolls")
+	cores.infoGui := myGui.AddText("xs+10 ys+20 w310 cGray", "no log sheet loaded")
+	myGui.SetFont("s9", "Arial")
+	cores.listGui := myGui.AddListView("xs+5 y+4 w320 h150 Checked -Multi Grid", ["", "UPC", "Roll", "Qty", "Sent"])
+	for col, width in [34, 94, 40, 46, 82]
+		cores.listGui.ModifyCol(col, width)
+	cores.listGui.OnEvent("DoubleClick", onCoresDoubleClick)
+	myGui.SetFont("s10", "Courier New")
+
+	myGui.AddText("xs+10 y+10", "QC By:")
+	coreData.initials.gui := myGui.AddEdit("x+5 yp-3 w45 Limit4 Uppercase", coreData.initials.value)
+	coreData.initials.gui.OnEvent("Change", (*) => saveItem(coreData.initials))
+	startButton := myGui.AddButton("x+10 yp-1 w55 h26 -TabStop", "start")
+	startButton.OnEvent("Click", onCoresStart)
+	backButton := myGui.AddButton("x+5 yp w50 h26 -TabStop", "back")
+	backButton.OnEvent("Click", onCoresBack)
+	cores.pauseButton := myGui.AddButton("x+5 yp w65 h26 -TabStop", "pause")
+	cores.pauseButton.OnEvent("Click", onCoresPause)
+
+	; ==== LOGO AREA ====
+	myGui.SetFont("s8")
+	logoButton := myGui.AddButton("xs y+14 h22 -TabStop", "set logo area")
+	logoButton.OnEvent("Click", onCoresSetLogo)
+	cores.logoGui := myGui.AddText("x+8 yp+4 w220 cGray", "")
+	updateLogoText()
+	myGui.SetFont("s14")
+	myGui.MarginY := 11
+
+	createDefaultEnterButton(tabNum)
 }
 
 setupSettingsTab(tabNum) {
@@ -951,8 +1029,10 @@ onWrite(*) {
 		file.Write(csvOut)
 		file.Close()
 		clearBgsForWrite(labelData)
+		return true
 	} catch as e {
 		MsgBox("An error ocurred during writing try path: " . csvPath . "`n" . e.Message)
+		return false
 	}
 }
 readCsv(*) {
@@ -976,6 +1056,337 @@ readCsv(*) {
 		return 0
 	}
 	return 1
+}
+
+; ==================================== CORE LABELS ======================================
+
+refreshCoreWorkbooks(*) {
+	names := []
+	activeName := ""
+	try {
+		xl := ComObjActive("Excel.Application")
+		try activeName := xl.ActiveWorkbook.Name
+		for wb in xl.Workbooks
+			if hasCoreList(wb)
+				names.Push(wb.Name)
+	}
+	cores.workbookGui.Delete()
+	cores.workbookGui.Add(names)
+	for i, name in names
+		if (i == 1 || name == activeName)
+			cores.workbookGui.Choose(i)
+}
+
+hasCoreList(wb) {
+	try return wb.Worksheets("config").Range("D24").HasSpill
+	return false
+}
+
+onCoresLoad(*) {
+	flushLogoClick()
+	name := cores.workbookGui.Text
+	if (name == "")
+		return MsgBox("No open log sheet with a core label list (config!D24#) was found.`n`nOpen the log sheet in Excel, then press ↻.")
+
+	try {
+		wb := ComObjActive("Excel.Application").Workbooks(name)
+		cell := wb.Worksheets("config").Range("D24")
+		if !cell.HasSpill
+			return MsgBox("No core label list in this workbook (config!D24# is empty).")
+		values := cell.SpillingToRange.Value2
+		customer := ""
+		try customer := wb.Names("order_customer").RefersToRange.Value2
+	} catch as e {
+		return MsgBox("Could not read the log sheet from Excel:`n" . e.Message . "`n`nIf Excel is busy (editing a cell or showing a form), finish that and try again.")
+	}
+	loadCoreRows(values, customer)
+}
+
+; values is the 2d array from config!D24#: order, upc, roll, qty
+loadCoreRows(values, customer) {
+	cores.rows := []
+	keyCounts := Map()
+	r0 := values.MinIndex(1), c0 := values.MinIndex(2)
+	Loop values.MaxIndex(1) - r0 + 1 {
+		r := r0 + A_Index - 1
+		row := {
+			order: cleanCell(values[r, c0]),
+			upc: cleanCell(values[r, c0 + 1], 12),
+			roll: cleanCell(values[r, c0 + 2]),
+			qty: cleanCell(values[r, c0 + 3]),
+		}
+		; key used to remember sent rolls, a repeated upc + roll gets a counter
+		key := row.upc . "-" . row.roll
+		keyCounts[key] := keyCounts.Get(key, 0) + 1
+		row.key := keyCounts[key] > 1 ? key . "#" . keyCounts[key] : key
+		cores.rows.Push(row)
+	}
+	if (cores.rows.Length == 0)
+		return MsgBox("The core label list (config!D24#) is empty.")
+
+	cores.order := cores.rows[1].order
+	cores.customer := cleanCell(customer)
+	if (cores.customer == "0")
+		cores.customer := ""
+	cores.current := 0
+	cores.sentStack := []
+	setCoresPaused(false)
+
+	lv := cores.listGui
+	lv.Opt("-Redraw")
+	lv.Delete()
+	for i, row in cores.rows {
+		sent := IniRead("config.ini", coresSection(), row.key, "")
+		lv.Add(sent == "" ? "Check" : "", "", row.upc, row.roll, row.qty, sentText(sent))
+	}
+	lv.Opt("+Redraw")
+	cores.infoGui.Value := Format("{}   {}   {} rolls", cores.order, cores.customer, cores.rows.Length)
+	updateCoresStatus()
+}
+
+; excel gives numbers as floats and may have commas/whitespace, digits pads upcs that lost leading zeros
+cleanCell(value, digits := 0) {
+	if IsObject(value) ; excel error values like #N/A
+		return ""
+	value := Trim(StrReplace(value, ",", ""), " `t`r`n")
+	if IsNumber(value)
+		value := String(Round(value))
+	if (digits && RegExMatch(value, "^\d+$") && StrLen(value) < digits)
+		value := Format("{:0" . digits . "d}", Integer(value))
+	return value
+}
+
+coresSection() => "cores_" . cores.order
+
+onCoresDoubleClick(lv, rowNum) {
+	if (rowNum == 0)
+		return
+	flushLogoClick()
+	writeCoreRoll(rowNum)
+}
+
+onCoresStart(*) {
+	flushLogoClick()
+	first := cores.listGui.GetNext(0, "Checked")
+	if (first == 0)
+		return MsgBox(cores.rows.Length ? "No rolls are checked." : "Load a log sheet first.")
+	if (coreData.logoX2.value == "")
+		MsgBox("The b&g logo area isn't set, so easyQC can't tell when you click the logo.`n`nPress 'set logo area' first, or double-click each roll yourself before clicking the logo.")
+
+	cores.sentStack := []
+	setCoresPaused(false)
+	writeCoreRoll(first)
+}
+
+onCoresBack(*) {
+	flushLogoClick()
+	if (cores.sentStack.Length == 0)
+		return statusBar.SetText("Nothing to go back to yet")
+	writeCoreRoll(cores.sentStack.Pop())
+}
+
+onCoresPause(*) {
+	flushLogoClick()
+	setCoresPaused(!cores.paused)
+	if (!cores.paused && cores.current)
+		writeCoreRoll(cores.current) ; the csv may have been changed from the label tab while paused
+	updateCoresStatus()
+}
+
+setCoresPaused(paused) {
+	cores.paused := paused
+	cores.pauseButton.Text := paused ? "resume" : "pause"
+}
+
+writeCoreRoll(rowNum) {
+	if (coreData.initials.gui.value == "") {
+		MsgBox("Type your initials in QC By first.")
+		return false
+	}
+	row := cores.rows[rowNum]
+	values := { order: row.order, upc: row.upc, initials: coreData.initials.gui.value, date: getDate(),
+		roll: row.roll, quantity: row.qty, customer: cores.customer }
+	for key, value in values.OwnProps() {
+		labelData.%key%.gui.value := value
+		saveItem(labelData.%key%)
+	}
+	if !onWrite()
+		return false
+
+	clearCurrentCore()
+	cores.current := rowNum
+	cores.listGui.Modify(rowNum, "Check Vis", "►")
+	updateCoresStatus()
+	return true
+}
+
+clearCurrentCore() {
+	if (cores.current)
+		cores.listGui.Modify(cores.current, "", "")
+	cores.current := 0
+}
+
+markCoreSent(rowNum) {
+	sent := coreData.initials.gui.value . " " . A_Now
+	IniWrite(sent, "config.ini", coresSection(), cores.rows[rowNum].key)
+	cores.listGui.Modify(rowNum, "-Check Col5", sentText(sent))
+}
+
+; sent rolls are saved as "<initials> <A_Now>", shown with the time if sent today, otherwise the date
+sentText(sent) {
+	if !RegExMatch(sent, "^(\S*) (\d{14})$", &match)
+		return sent
+	isToday := SubStr(match[2], 1, 8) == SubStr(A_Now, 1, 8)
+	return match[1] . " " . (isToday ? StrLower(FormatTime(match[2], "h:mmt")) : FormatTime(match[2], "M/d"))
+}
+
+onCoresClick() {
+	CoordMode("Mouse", "Screen")
+	MouseGetPos(&x, &y, &win)
+	if !isOverLogo(x, y, win)
+		return
+	; wait for the b&g program to read the csv before writing the next roll, a second click restarts the wait
+	cores.pendingClick := true
+	SetTimer(onLogoPrinted, -(IsInteger(coreData.delay.value) ? coreData.delay.value : 1500))
+}
+
+onLogoPrinted() {
+	cores.pendingClick := false
+	if (!cores.current)
+		return
+	markCoreSent(cores.current)
+	cores.sentStack.Push(cores.current)
+
+	next := cores.listGui.GetNext(cores.current, "Checked")
+	if (next == 0)
+		next := cores.listGui.GetNext(0, "Checked") ; checked rows above the current one
+	if (next == 0) {
+		clearCurrentCore()
+		return updateCoresStatus()
+	}
+	writeCoreRoll(next)
+}
+
+; handle a logo click that is still waiting on its delay before the user changes anything
+flushLogoClick() {
+	if (!cores.pendingClick)
+		return
+	SetTimer(onLogoPrinted, 0)
+	onLogoPrinted()
+}
+
+isOverLogo(x, y, win) {
+	if (coreData.logoX2.value == "" || win == myGui.Hwnd)
+		return false
+	try {
+		if (coreData.logoClass.value != "" && WinGetClass(win) != coreData.logoClass.value)
+			return false
+		if (coreData.logoExe.value != "" && WinGetProcessName(win) != coreData.logoExe.value)
+			return false
+		WinGetPos(&winX, &winY,,, win)
+	} catch
+		return false
+	x -= winX, y -= winY
+	return (x >= coreData.logoX1.value && x <= coreData.logoX2.value
+		&& y >= coreData.logoY1.value && y <= coreData.logoY2.value)
+}
+
+updateCoresStatus() {
+	if (Tab.value != cores.tabNum)
+		return
+	if (!cores.current) {
+		msg := tabStatusMessages[cores.tabNum]
+		if (cores.rows.Length)
+			msg := cores.listGui.GetNext(0, "Checked") ? "Check the rolls to print, then press start" : "No checked rolls left"
+		return statusBar.SetText(msg)
+	}
+	left := 0, i := 0
+	while (i := cores.listGui.GetNext(i, "Checked"))
+		left++
+	row := cores.rows[cores.current]
+	statusBar.SetText(Format("{}{} roll {} ready, click logo ({} left)",
+		cores.paused ? "PAUSED " : "", SubStr(row.upc, -4), row.roll, left))
+}
+
+; the logo area is found by hovering instead of clicking, since clicking the logo prints
+onCoresSetLogo(*) {
+	cores.logoStep := 1
+	cores.logoCountdown := 3
+	SetTimer(logoCountdownTick, 1000)
+	logoCountdownTick()
+}
+
+logoCountdownTick() {
+	corner := (cores.logoStep == 1) ? "TOP-LEFT" : "BOTTOM-RIGHT"
+	if (cores.logoCountdown > 0) {
+		ToolTip("Hold the mouse over the " . corner . " corner of the b&g logo`n(don't click it)   " . cores.logoCountdown)
+		cores.logoCountdown -= 1
+		return
+	}
+	ToolTip()
+	CoordMode("Mouse", "Screen")
+	MouseGetPos(&x, &y, &win)
+	try WinGetPos(&winX, &winY,,, win)
+	catch {
+		SetTimer(logoCountdownTick, 0)
+		return MsgBox("Couldn't read the window under the mouse, try again.")
+	}
+	if (win == myGui.Hwnd) {
+		SetTimer(logoCountdownTick, 0)
+		return MsgBox("That was easyQC's window, hold the mouse over the b&g logo instead.")
+	}
+	x -= winX, y -= winY
+
+	if (cores.logoStep == 1) {
+		cores.logoCorner := { win: win, x: x, y: y }
+		cores.logoStep := 2
+		cores.logoCountdown := 3
+		return logoCountdownTick()
+	}
+	SetTimer(logoCountdownTick, 0)
+	if (win != cores.logoCorner.win)
+		return MsgBox("The two corners were on different windows, try again.")
+
+	exe := "", cls := "", title := "", pid := 0
+	try exe := WinGetProcessName(win)
+	try cls := WinGetClass(win)
+	try title := WinGetTitle(win)
+	try pid := WinGetPID(win)
+	values := { logoExe: exe, logoClass: cls,
+		logoX1: Min(x, cores.logoCorner.x), logoY1: Min(y, cores.logoCorner.y),
+		logoX2: Max(x, cores.logoCorner.x), logoY2: Max(y, cores.logoCorner.y) }
+	for key, value in values.OwnProps() {
+		coreData.%key%.value := value
+		IniWrite(value, "config.ini", "cores", key)
+	}
+	updateLogoText()
+
+	msg := Format("Logo area saved ({} x {} px)`n`n{}`nahk_exe {}`nahk_class {}",
+		values.logoX2 - values.logoX1, values.logoY2 - values.logoY1, title, exe, cls)
+	if (!A_IsAdmin && isElevated(pid) == 1)
+		msg .= "`n`nThe b&g program is running as administrator, so easyQC can't see clicks on it. Close easyQC and run it as administrator too (right-click > Run as administrator)."
+	MsgBox(msg)
+}
+
+updateLogoText() {
+	if (coreData.logoX2.value == "")
+		cores.logoGui.Value := "logo area not set"
+	else
+		cores.logoGui.Value := "logo area set (" . coreData.logoExe.value . ")"
+}
+
+; 1 if the process runs as admin, 0 if not, -1 if unknown
+isElevated(pid) {
+	elevated := -1
+	if !(hProcess := DllCall("OpenProcess", "UInt", 0x1000, "Int", false, "UInt", pid, "Ptr")) ; PROCESS_QUERY_LIMITED_INFORMATION
+		return elevated
+	if DllCall("advapi32\OpenProcessToken", "Ptr", hProcess, "UInt", 0x8, "Ptr*", &hToken := 0) { ; TOKEN_QUERY
+		if DllCall("advapi32\GetTokenInformation", "Ptr", hToken, "Int", 20, "UInt*", &tokenElevated := 0, "UInt", 4, "UInt*", &size := 0) ; TokenElevation
+			elevated := tokenElevated
+		DllCall("CloseHandle", "Ptr", hToken)
+	}
+	DllCall("CloseHandle", "Ptr", hProcess)
+	return elevated
 }
 
 changeCounter(item, direction, counterDigits := 3) {
@@ -1111,6 +1522,9 @@ onWheel(direction) {
 	} 
 	Sleep(30) ;; limit script
 }
+
+#HotIf cores.current && !cores.paused
+~LButton Up:: onCoresClick()
 
 #HotIf exeActive("cmd.exe", "WindowsTerminal.exe", "emacs.exe", "sublime_text.exe", paths.rfid_file.gui.value) or classActive("Notepad")
 ^1::onPrint()
