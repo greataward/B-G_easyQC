@@ -15,7 +15,7 @@ FONT_SIZE := 14
 TAB_FONT_SIZE := 10
 DEFAULT_TAB := devMode ? 3 : 1
 tabTitles := [ "Main", "Samples", "Label", "Cores", "Settings"]
-tabStatusMessages := ["Press ctrl+1 to output values", "Press ctrl+2 to output values, w/ blank upc", "", "Load a log sheet from Excel", ""]
+tabStatusMessages := ["Press ctrl+1 to output values", "Press ctrl+2 to output values, w/ blank upc", "", "Pick a log sheet and press load", ""]
 ; COLORS
 PALE_BLUE := "eef2ff"
 NAVY_BLUE := "4d6d9a"
@@ -131,8 +131,9 @@ paths := {
 }
 setupForIni(paths, "paths")
 
-; core labels: rolls are read from the log sheet's config!D24# list (order, upc, roll, qty)
+; core labels: rolls are read from the log sheet file's config!D24# list (order, upc, roll, qty)
 coreData := {
+	folder: { value: "" }, ; onedrive synced folder with the log sheets
 	initials: { value: "" },
 	delay: { value: 1500 }, ; ms to wait after a logo click before writing the next roll
 	logoExe: { value: "" },
@@ -145,6 +146,7 @@ coreData := {
 setupForIni(coreData, "cores")
 
 cores := {
+	files: [],     ; log sheet paths in the dropdown
 	rows: [],      ; { order, upc, roll, qty, key }
 	order: "",
 	customer: "",
@@ -366,7 +368,7 @@ onTabChange(tabObj) {
 	defaultButtons[tabNum].Opt("+Default")
 
 	if (tabNum == cores.tabNum) {
-		refreshCoreWorkbooks()
+		refreshCoreFiles()
 		updateCoresStatus()
 	}
 }
@@ -706,10 +708,13 @@ setupCoresTab(tabNum) {
 
 	; ==== LOG SHEET ====
 	myGui.AddGroupBox("w330 h58 cGray Section", "log sheet")
-	cores.workbookGui := myGui.AddDropDownList("xs+10 ys+22 w205")
+	cores.fileGui := myGui.AddDropDownList("xs+10 ys+22 w170")
+	cores.fileGui.SetFont("s9", "Arial")
 	refreshButton := myGui.AddButton("x+5 yp-1 w30 h26 -TabStop", "↻")
 	refreshButton.SetFont(, "Segoe UI Symbol")
-	refreshButton.OnEvent("Click", refreshCoreWorkbooks)
+	refreshButton.OnEvent("Click", refreshCoreFiles)
+	folderButton := myGui.AddButton("x+5 yp w30 h26 -TabStop", "…")
+	folderButton.OnEvent("Click", onCoresFolder)
 	loadButton := myGui.AddButton("x+5 yp w65 h26 -TabStop", "load")
 	loadButton.OnEvent("Click", onCoresLoad)
 
@@ -1060,60 +1065,148 @@ readCsv(*) {
 
 ; ==================================== CORE LABELS ======================================
 
-refreshCoreWorkbooks(*) {
+; log sheets are read from the onedrive synced folder (no excel on the core label computer), newest first
+refreshCoreFiles(*) {
+	selected := cores.fileGui.Value ? cores.files[cores.fileGui.Value] : ""
+	list := ""
+	if (coreData.folder.value != "" && DirExist(coreData.folder.value))
+		Loop Files, coreData.folder.value . "\*.xlsx", "FR"
+			if (SubStr(A_LoopFileName, 1, 2) != "~$") ; excel lock files
+				list .= A_LoopFileTimeModified . "`t" . A_LoopFileFullPath . "`n"
+
+	cores.files := []
 	names := []
-	activeName := ""
-	try {
-		xl := ComObjActive("Excel.Application")
-		try activeName := xl.ActiveWorkbook.Name
-		for wb in xl.Workbooks
-			if hasCoreList(wb)
-				names.Push(wb.Name)
-	}
-	cores.workbookGui.Delete()
-	cores.workbookGui.Add(names)
-	for i, name in names
-		if (i == 1 || name == activeName)
-			cores.workbookGui.Choose(i)
+	if (list != "")
+		for i, line in StrSplit(Sort(RTrim(list, "`n"), "R"), "`n") {
+			if (i > 40)
+				break
+			path := StrSplit(line, "`t")[2]
+			SplitPath(path,,,, &name)
+			cores.files.Push(path)
+			names.Push(name)
+		}
+	cores.fileGui.Delete()
+	cores.fileGui.Add(names)
+	for i, path in cores.files
+		if (i == 1 || path == selected)
+			cores.fileGui.Choose(i)
 }
 
-hasCoreList(wb) {
-	try return wb.Worksheets("config").Range("D24").HasSpill
-	return false
+onCoresFolder(*) {
+	folder := DirSelect("*" . coreData.folder.value, 0, "Choose the OneDrive folder with the log sheets")
+	if (folder == "")
+		return
+	coreData.folder.value := folder
+	IniWrite(folder, "config.ini", "cores", "folder")
+	refreshCoreFiles()
 }
 
 onCoresLoad(*) {
 	flushLogoClick()
-	name := cores.workbookGui.Text
-	if (name == "")
-		return MsgBox("No open log sheet with a core label list (config!D24#) was found.`n`nOpen the log sheet in Excel, then press ↻.")
-
-	try {
-		wb := ComObjActive("Excel.Application").Workbooks(name)
-		cell := wb.Worksheets("config").Range("D24")
-		if !cell.HasSpill
-			return MsgBox("No core label list in this workbook (config!D24# is empty).")
-		values := cell.SpillingToRange.Value2
-		customer := ""
-		try customer := wb.Names("order_customer").RefersToRange.Value2
-	} catch as e {
-		return MsgBox("Could not read the log sheet from Excel:`n" . e.Message . "`n`nIf Excel is busy (editing a cell or showing a form), finish that and try again.")
+	if (cores.fileGui.Value == 0) {
+		if (coreData.folder.value == "")
+			return MsgBox("Press … to choose the OneDrive folder with the log sheets.")
+		return MsgBox("No log sheets (.xlsx) found in:`n" . coreData.folder.value)
 	}
-	loadCoreRows(values, customer)
+	try list := readCoreList(cores.files[cores.fileGui.Value])
+	catch as e
+		return MsgBox("Could not read the log sheet:`n`n" . e.Message)
+	loadCoreRows(list.rows, list.customer)
 }
 
-; values is the 2d array from config!D24#: order, upc, roll, qty
+; an .xlsx is a zip of xml files, tar.exe comes with windows 10 and newer
+readCoreList(path) {
+	tmp := A_Temp . "\easyQC_logsheet"
+	try DirDelete(tmp, true)
+	DirCreate(tmp)
+	try {
+		RunWait(Format('"{}\System32\tar.exe" -xf "{}" -C "{}" xl/workbook.xml xl/_rels xl/sharedStrings.xml xl/worksheets',
+			A_WinDir, path, tmp),, "Hide")
+		if !FileExist(tmp . "\xl\workbook.xml")
+			throw Error("Couldn't open " . path . "`n`nIf it's still syncing from OneDrive, wait a moment and try again.")
+		return readCoreXml(tmp . "\xl\")
+	} finally {
+		try DirDelete(tmp, true)
+	}
+}
+
+; reads the values excel last saved for config!D24# (order, upc, roll, qty) from an unzipped log sheet
+readCoreXml(dir) {
+	workbook := loadXml(dir . "workbook.xml")
+	rels := loadXml(dir . "_rels\workbook.xml.rels")
+	strings := FileExist(dir . "sharedStrings.xml") ? loadXml(dir . "sharedStrings.xml").selectNodes("/x:sst/x:si") : ""
+
+	sheet := loadXml(sheetFile(dir, workbook, rels, "config"))
+	spill := sheet.selectSingleNode("//x:c[@r='D24']/x:f/@ref")
+	if (!spill || !RegExMatch(spill.text, "^D24:G(\d+)$", &match))
+		throw Error("No core label list in this log sheet (config!D24# is empty or missing).")
+
+	rows := []
+	columns := Map("D", 1, "E", 2, "F", 3, "G", 4)
+	for rowNode in sheet.selectNodes("/x:worksheet/x:sheetData/x:row[@r >= 24 and @r <= " . match[1] . "]") {
+		row := ["", "", "", ""]
+		for cell in rowNode.selectNodes("x:c")
+			if columns.Has(col := RegExReplace(cell.getAttribute("r"), "\d"))
+				row[columns[col]] := cellText(cell, strings)
+		rows.Push(row)
+	}
+
+	customer := ""
+	try customer := definedNameText(dir, workbook, rels, strings, "order_customer")
+	return { rows: rows, customer: customer }
+}
+
+; the value of a single cell name like order_customer ('Production Planner'!$A$3)
+definedNameText(dir, workbook, rels, strings, name) {
+	ref := workbook.selectSingleNode("/x:workbook/x:definedNames/x:definedName[@name='" . name . "']")
+	if (!ref || !RegExMatch(ref.text, "^'?(.+?)'?!\$?([A-Z]+)\$?(\d+)$", &match))
+		return ""
+	sheet := loadXml(sheetFile(dir, workbook, rels, match[1]))
+	cell := sheet.selectSingleNode(Format("/x:worksheet/x:sheetData/x:row[@r={2}]/x:c[@r='{1}{2}']", match[2], match[3]))
+	return cell ? cellText(cell, strings) : ""
+}
+
+sheetFile(dir, workbook, rels, name) {
+	sheet := workbook.selectSingleNode("/x:workbook/x:sheets/x:sheet[@name='" . name . "']")
+	if !sheet
+		throw Error("This file has no '" . name . "' sheet, is it a log sheet?")
+	rel := rels.selectSingleNode("/p:Relationships/p:Relationship[@Id='" . sheet.selectSingleNode("@r:id").text . "']")
+	target := StrReplace(rel.getAttribute("Target"), "/", "\")
+	return (SubStr(target, 1, 1) == "\") ? dir . "..\" . SubStr(target, 2) : dir . target
+}
+
+; the value excel saved in a cell, text cells (t="s") point into sharedStrings.xml
+cellText(cell, strings) {
+	type := cell.getAttribute("t")
+	if (type == "inlineStr")
+		return (inline := cell.selectSingleNode("x:is")) ? inline.text : ""
+	value := cell.selectSingleNode("x:v")
+	if (!value || type == "e")
+		return ""
+	return (type == "s" && strings) ? strings.item(Integer(value.text)).text : value.text
+}
+
+loadXml(file) {
+	doc := ComObject("Msxml2.DOMDocument.6.0")
+	doc.async := false
+	doc.setProperty("SelectionNamespaces", "xmlns:x='http://schemas.openxmlformats.org/spreadsheetml/2006/main' "
+		. "xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships' "
+		. "xmlns:p='http://schemas.openxmlformats.org/package/2006/relationships'")
+	if !doc.load(file)
+		throw Error("Couldn't read " . file . "`n" . doc.parseError.reason)
+	return doc
+}
+
+; values are the config!D24# rows: [order, upc, roll, qty]
 loadCoreRows(values, customer) {
 	cores.rows := []
 	keyCounts := Map()
-	r0 := values.MinIndex(1), c0 := values.MinIndex(2)
-	Loop values.MaxIndex(1) - r0 + 1 {
-		r := r0 + A_Index - 1
+	for i, cells in values {
 		row := {
-			order: cleanCell(values[r, c0]),
-			upc: cleanCell(values[r, c0 + 1], 12),
-			roll: cleanCell(values[r, c0 + 2]),
-			qty: cleanCell(values[r, c0 + 3]),
+			order: cleanCell(cells[1]),
+			upc: cleanCell(cells[2], 12),
+			roll: cleanCell(cells[3]),
+			qty: cleanCell(cells[4]),
 		}
 		; key used to remember sent rolls, a repeated upc + roll gets a counter
 		key := row.upc . "-" . row.roll
