@@ -16,7 +16,7 @@ Fills the b&g core label csv straight from the order's log sheet, using the `con
 - sent rolls are remembered per order in `config.ini` and start unchecked the next time the order is loaded
 
 **First time setup:**
-- press **…** and choose the synced `000-Orders` folder in File Explorer. Every `Log Sheet` .xlsx in its customer and order folders is listed, newest changed first
+- in SharePoint, use **Add shortcut to OneDrive** on `000-Orders`. easyQC finds it in the work OneDrive folder by itself; if it's somewhere else, press **…** and choose it. Every `Log Sheet` .xlsx in its customer and order folders is listed, newest changed first
 - press **set logo area** and hold the mouse (don't click) over the top-left corner of the b&g logo, then the bottom-right corner when asked. The status bar says "Logo click seen" for each click on the logo. If the b&g program runs as administrator, Windows hides those clicks from easyQC, so easyQC offers to restart itself as administrator (when setting the logo area and when pressing **start**).
 
 The roll list is what Excel last saved in the log sheet, so save any changes in Excel and let OneDrive sync before loading. The wait after a logo click can be changed with `delay=` (ms) under `[cores]` in `config.ini`.

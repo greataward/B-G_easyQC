@@ -1087,6 +1087,10 @@ readCsv(*) {
 
 ; log sheets are read from the onedrive synced folder (no excel on the core label computer), newest first
 refreshCoreFiles(*) {
+	if (coreData.folder.value == "")
+		findOrdersFolder()
+	if (Tab.value == cores.tabNum)
+		statusBar.SetText("Searching for log sheets...")
 	selected := cores.fileGui.Value ? cores.files[cores.fileGui.Value] : ""
 	list := ""
 	if (coreData.folder.value != "" && DirExist(coreData.folder.value))
@@ -1110,14 +1114,29 @@ refreshCoreFiles(*) {
 	for i, path in cores.files
 		if (i == 1 || path == selected)
 			cores.fileGui.Choose(i)
+	updateCoresStatus()
+}
+
+; "add shortcut to onedrive" in sharepoint puts 000-Orders in the root of the work onedrive folder
+findOrdersFolder() {
+	for i, root in [EnvGet("OneDriveCommercial"), EnvGet("OneDrive")]
+		if (root != "" && DirExist(root . "\000-Orders")) {
+			setCoreFolder(root . "\000-Orders")
+			return
+		}
+}
+
+setCoreFolder(folder) {
+	coreData.folder.value := folder
+	IniWrite(folder, "config.ini", "cores", "folder")
 }
 
 onCoresFolder(*) {
-	folder := DirSelect("*" . coreData.folder.value, 0, "Choose the OneDrive folder with the log sheets")
+	start := (coreData.folder.value != "") ? coreData.folder.value : EnvGet("OneDriveCommercial")
+	folder := FileSelect("D", start, "Choose the synced 000-Orders folder")
 	if (folder == "")
 		return
-	coreData.folder.value := folder
-	IniWrite(folder, "config.ini", "cores", "folder")
+	setCoreFolder(folder)
 	refreshCoreFiles()
 }
 
@@ -1125,8 +1144,8 @@ onCoresLoad(*) {
 	flushLogoClick()
 	if (cores.fileGui.Value == 0) {
 		if (coreData.folder.value == "")
-			return MsgBox("Press … to choose the OneDrive folder with the log sheets.")
-		return MsgBox("No log sheets (.xlsx) found in:`n" . coreData.folder.value)
+			return MsgBox("Press … to choose the synced 000-Orders folder.`n`nIn SharePoint, 'Add shortcut to OneDrive' on 000-Orders puts it in File Explorer.")
+		return MsgBox("No log sheets found in:`n" . coreData.folder.value . "`n`nPress ↻ to search again, or … to choose another folder.")
 	}
 	try list := readCoreList(cores.files[cores.fileGui.Value])
 	catch as e
