@@ -368,7 +368,8 @@ onTabChange(tabObj) {
 	defaultButtons[tabNum].Opt("+Default")
 
 	if (tabNum == cores.tabNum) {
-		refreshCoreFiles()
+		if (cores.files.Length == 0) ; searching the orders folder can be slow, after that only on ↻
+			refreshCoreFiles()
 		updateCoresStatus()
 	}
 }
@@ -1070,7 +1071,7 @@ refreshCoreFiles(*) {
 	selected := cores.fileGui.Value ? cores.files[cores.fileGui.Value] : ""
 	list := ""
 	if (coreData.folder.value != "" && DirExist(coreData.folder.value))
-		Loop Files, coreData.folder.value . "\*.xlsx", "FR"
+		Loop Files, coreData.folder.value . "\*Log Sheet*.xlsx", "FR" ; order folders also have art, ropp and po .xlsx files
 			if (SubStr(A_LoopFileName, 1, 2) != "~$") ; excel lock files
 				list .= A_LoopFileTimeModified . "`t" . A_LoopFileFullPath . "`n"
 
