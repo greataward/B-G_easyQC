@@ -1,5 +1,6 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance force
+SetWorkingDir(A_ScriptDir) ; config.ini is next to the script, even when run as administrator
 ; =======================================================================================
 ; ==================================== LOAD VARIABLES ===================================
 ; =======================================================================================
@@ -367,6 +368,11 @@ onTabChange(tabObj) {
 	tabNum := tabObj.value
 	defaultButtons[tabNum].Opt("+Default")
 
+	if (tabNum == 3) { ; label values may have been changed from the cores tab
+		updateFixVisibility()
+		for key, item in labelData.OwnProps()
+			updateItemBg(item)
+	}
 	if (tabNum == cores.tabNum) {
 		if (cores.files.Length == 0) ; searching the orders folder can be slow, after that only on ↻
 			refreshCoreFiles()
@@ -724,7 +730,7 @@ setupCoresTab(tabNum) {
 	cores.infoGui := myGui.AddText("xs+10 ys+20 w310 cGray", "no log sheet loaded")
 	myGui.SetFont("s9", "Arial")
 	cores.listGui := myGui.AddListView("xs+5 y+4 w320 h150 Checked -Multi Grid", ["", "UPC", "Roll", "Qty", "Sent"])
-	for col, width in [34, 94, 40, 46, 82]
+	for col, width in [30, 110, 36, 42, 78]
 		cores.listGui.ModifyCol(col, width)
 	cores.listGui.OnEvent("DoubleClick", onCoresDoubleClick)
 	myGui.SetFont("s10", "Courier New")
@@ -1020,6 +1026,15 @@ csvConcat(array) {
 	return out
 }
 onWrite(*) {
+	if !writeLabelCsv()
+		return false
+	clearBgsForWrite(labelData)
+	return true
+}
+
+; writes the label tab values to the csv without redrawing anything, so it is safe from other tabs
+; (redrawing a control on a hidden tab makes it show up on top of the current tab)
+writeLabelCsv() {
 	try {
 		csvKeysArray := ["","","","","","",""]
 		csvValuesArray := ["","","","","","",""]
@@ -1034,7 +1049,6 @@ onWrite(*) {
 		file := FileOpen(csvPath, "w")
 		file.Write(csvOut)
 		file.Close()
-		clearBgsForWrite(labelData)
 		return true
 	} catch as e {
 		MsgBox("An error ocurred during writing try path: " . csvPath . "`n" . e.Message)
@@ -1266,6 +1280,8 @@ onCoresStart(*) {
 		return MsgBox(cores.rows.Length ? "No rolls are checked." : "Load a log sheet first.")
 	if (coreData.logoX2.value == "")
 		MsgBox("The b&g logo area isn't set, so easyQC can't tell when you click the logo.`n`nPress 'set logo area' first, or double-click each roll yourself before clicking the logo.")
+	else if isBlockedByAdmin(findLogoWindow())
+		offerAdminRestart()
 
 	cores.sentStack := []
 	setCoresPaused(false)
@@ -1302,9 +1318,9 @@ writeCoreRoll(rowNum) {
 		roll: row.roll, quantity: row.qty, customer: cores.customer }
 	for key, value in values.OwnProps() {
 		labelData.%key%.gui.value := value
-		saveItem(labelData.%key%)
+		writeItem(labelData.%key%) ; not saveItem, it redraws the label tab's controls
 	}
-	if !onWrite()
+	if !writeLabelCsv()
 		return false
 
 	clearCurrentCore()
@@ -1337,11 +1353,16 @@ sentText(sent) {
 onCoresClick() {
 	CoordMode("Mouse", "Screen")
 	MouseGetPos(&x, &y, &win)
-	if !isOverLogo(x, y, win)
+	hit := logoHit(x, y, win)
+	if (hit == "window" && Tab.value == cores.tabNum)
+		statusBar.SetText("That click missed the logo area, use 'set logo area' if it moved")
+	if (hit != "logo")
 		return
 	; wait for the b&g program to read the csv before writing the next roll, a second click restarts the wait
 	cores.pendingClick := true
 	SetTimer(onLogoPrinted, -(IsInteger(coreData.delay.value) ? coreData.delay.value : 1500))
+	if (Tab.value == cores.tabNum)
+		statusBar.SetText("Logo click seen, writing the next roll...")
 }
 
 onLogoPrinted() {
@@ -1369,20 +1390,23 @@ flushLogoClick() {
 	onLogoPrinted()
 }
 
-isOverLogo(x, y, win) {
+; "logo" for a click on the b&g logo, "window" for anywhere else on the b&g window, "" otherwise
+; the window is matched by exe when known, class names of some programs change every time they start
+logoHit(x, y, win) {
 	if (coreData.logoX2.value == "" || win == myGui.Hwnd)
-		return false
+		return ""
 	try {
-		if (coreData.logoClass.value != "" && WinGetClass(win) != coreData.logoClass.value)
-			return false
-		if (coreData.logoExe.value != "" && WinGetProcessName(win) != coreData.logoExe.value)
-			return false
+		if (coreData.logoExe.value != "") {
+			if (WinGetProcessName(win) != coreData.logoExe.value)
+				return ""
+		} else if (WinGetClass(win) != coreData.logoClass.value)
+			return ""
 		WinGetPos(&winX, &winY,,, win)
 	} catch
-		return false
+		return ""
 	x -= winX, y -= winY
 	return (x >= coreData.logoX1.value && x <= coreData.logoX2.value
-		&& y >= coreData.logoY1.value && y <= coreData.logoY2.value)
+		&& y >= coreData.logoY1.value && y <= coreData.logoY2.value) ? "logo" : "window"
 }
 
 updateCoresStatus() {
@@ -1441,11 +1465,10 @@ logoCountdownTick() {
 	if (win != cores.logoCorner.win)
 		return MsgBox("The two corners were on different windows, try again.")
 
-	exe := "", cls := "", title := "", pid := 0
+	exe := "", cls := "", title := ""
 	try exe := WinGetProcessName(win)
 	try cls := WinGetClass(win)
 	try title := WinGetTitle(win)
-	try pid := WinGetPID(win)
 	values := { logoExe: exe, logoClass: cls,
 		logoX1: Min(x, cores.logoCorner.x), logoY1: Min(y, cores.logoCorner.y),
 		logoX2: Max(x, cores.logoCorner.x), logoY2: Max(y, cores.logoCorner.y) }
@@ -1455,32 +1478,43 @@ logoCountdownTick() {
 	}
 	updateLogoText()
 
-	msg := Format("Logo area saved ({} x {} px)`n`n{}`nahk_exe {}`nahk_class {}",
-		values.logoX2 - values.logoX1, values.logoY2 - values.logoY1, title, exe, cls)
-	if (!A_IsAdmin && isElevated(pid) == 1)
-		msg .= "`n`nThe b&g program is running as administrator, so easyQC can't see clicks on it. Close easyQC and run it as administrator too (right-click > Run as administrator)."
-	MsgBox(msg)
+	MsgBox(Format("Logo area saved ({} x {} px)`n`n{}`nahk_exe {}`nahk_class {}",
+		values.logoX2 - values.logoX1, values.logoY2 - values.logoY1, title, exe, cls))
+	if isBlockedByAdmin(win)
+		offerAdminRestart()
 }
 
 updateLogoText() {
 	if (coreData.logoX2.value == "")
 		cores.logoGui.Value := "logo area not set"
 	else
-		cores.logoGui.Value := "logo area set (" . coreData.logoExe.value . ")"
+		cores.logoGui.Value := "logo area set (" . (coreData.logoExe.value != "" ? coreData.logoExe.value : coreData.logoClass.value) . ")"
 }
 
-; 1 if the process runs as admin, 0 if not, -1 if unknown
-isElevated(pid) {
-	elevated := -1
-	if !(hProcess := DllCall("OpenProcess", "UInt", 0x1000, "Int", false, "UInt", pid, "Ptr")) ; PROCESS_QUERY_LIMITED_INFORMATION
-		return elevated
-	if DllCall("advapi32\OpenProcessToken", "Ptr", hProcess, "UInt", 0x8, "Ptr*", &hToken := 0) { ; TOKEN_QUERY
-		if DllCall("advapi32\GetTokenInformation", "Ptr", hToken, "Int", 20, "UInt*", &tokenElevated := 0, "UInt", 4, "UInt*", &size := 0) ; TokenElevation
-			elevated := tokenElevated
-		DllCall("CloseHandle", "Ptr", hToken)
-	}
-	DllCall("CloseHandle", "Ptr", hProcess)
-	return elevated
+findLogoWindow() {
+	if (coreData.logoExe.value != "")
+		return WinExist("ahk_exe " . coreData.logoExe.value)
+	if (coreData.logoClass.value != "")
+		return WinExist("ahk_class " . coreData.logoClass.value)
+	return 0
+}
+
+; windows hides clicks on a program running as admin from programs that aren't,
+; a blocked message (access denied) to its window means that is the case
+isBlockedByAdmin(win) {
+	if (A_IsAdmin || !win)
+		return false
+	return !DllCall("PostMessage", "Ptr", win, "UInt", 0, "Ptr", 0, "Ptr", 0) && A_LastError == 5 ; WM_NULL
+}
+
+offerAdminRestart() {
+	answer := MsgBox("The b&g program is running as administrator, so Windows hides your clicks on its logo from easyQC.`n`nRestart easyQC as administrator now?", "easyQC", "YesNo Icon!")
+	if (answer != "Yes")
+		return
+	try Run('*RunAs "' . A_AhkPath . '" /restart "' . A_ScriptFullPath . '"', A_ScriptDir)
+	catch
+		return MsgBox("easyQC couldn't restart as administrator. Right-click the script and choose 'Run as administrator' instead.")
+	ExitApp()
 }
 
 changeCounter(item, direction, counterDigits := 3) {
