@@ -16,7 +16,7 @@ FONT_SIZE := 14
 TAB_FONT_SIZE := 10
 DEFAULT_TAB := devMode ? 3 : 1
 tabTitles := [ "Main", "Samples", "Label", "Cores", "Settings"]
-tabStatusMessages := ["Press ctrl+1 to output values", "Press ctrl+2 to output values, w/ blank upc", "", "Pick a log sheet and press load", ""]
+tabStatusMessages := ["Press ctrl+1 to output values", "Press ctrl+2 to output values, w/ blank upc", "", "Press open to choose the order's Log Sheet", ""]
 ; COLORS
 PALE_BLUE := "eef2ff"
 NAVY_BLUE := "4d6d9a"
@@ -134,7 +134,8 @@ setupForIni(paths, "paths")
 
 ; core labels: rolls are read from the log sheet file's config!D24# list (order, upc, roll, qty)
 coreData := {
-	folder: { value: "" }, ; onedrive synced folder with the log sheets
+	folder: { value: "" }, ; where the log sheet picker starts, normally the synced 000-Orders
+	file: { value: "" },   ; the last log sheet opened
 	initials: { value: "" },
 	delay: { value: 1500 }, ; ms to wait after a logo click before writing the next roll
 	logoExe: { value: "" },
@@ -147,7 +148,6 @@ coreData := {
 setupForIni(coreData, "cores")
 
 cores := {
-	files: [],     ; log sheet paths in the dropdown
 	rows: [],      ; { order, upc, roll, qty, key }
 	order: "",
 	customer: "",
@@ -375,11 +375,8 @@ onTabChange(tabObj) {
 		for key, item in labelData.OwnProps()
 			updateItemBg(item)
 	}
-	if (tabNum == cores.tabNum) {
-		if (cores.files.Length == 0) ; searching the orders folder can be slow, after that only on ↻
-			refreshCoreFiles()
+	if (tabNum == cores.tabNum)
 		updateCoresStatus()
-	}
 }
 
 clearItems(items) {
@@ -717,15 +714,14 @@ setupCoresTab(tabNum) {
 
 	; ==== LOG SHEET ====
 	myGui.AddGroupBox("w330 h58 cGray Section", "log sheet")
-	cores.fileGui := myGui.AddDropDownList("xs+10 ys+22 w170")
+	cores.fileGui := myGui.AddText("xs+10 ys+27 w205")
 	cores.fileGui.SetFont("s9", "Arial")
-	refreshButton := myGui.AddButton("x+5 yp-1 w30 h26 -TabStop", "↻")
-	refreshButton.SetFont(, "Segoe UI Symbol")
-	refreshButton.OnEvent("Click", refreshCoreFiles)
-	folderButton := myGui.AddButton("x+5 yp w30 h26 -TabStop", "…")
-	folderButton.OnEvent("Click", onCoresFolder)
-	loadButton := myGui.AddButton("x+5 yp w65 h26 -TabStop", "load")
-	loadButton.OnEvent("Click", onCoresLoad)
+	updateFileText()
+	reloadButton := myGui.AddButton("x+5 ys+21 w30 h26 -TabStop", "↻")
+	reloadButton.SetFont(, "Segoe UI Symbol")
+	reloadButton.OnEvent("Click", onCoresReload)
+	openButton := myGui.AddButton("x+5 yp w65 h26 -TabStop", "open")
+	openButton.OnEvent("Click", onCoresOpen)
 
 	; ==== ROLLS ====
 	myGui.AddGroupBox("xs w330 h238 cBlue Section", "rolls")
@@ -1085,72 +1081,58 @@ readCsv(*) {
 
 ; ==================================== CORE LABELS ======================================
 
-; log sheets are read from the onedrive synced folder (no excel on the core label computer), newest first
-refreshCoreFiles(*) {
-	if (coreData.folder.value == "")
-		findOrdersFolder()
-	if (Tab.value == cores.tabNum)
-		statusBar.SetText("Searching for log sheets...")
-	selected := cores.fileGui.Value ? cores.files[cores.fileGui.Value] : ""
-	list := ""
-	if (coreData.folder.value != "" && DirExist(coreData.folder.value))
-		Loop Files, coreData.folder.value . "\*Log Sheet*.xlsx", "FR" ; order folders also have art, ropp and po .xlsx files
-			if (SubStr(A_LoopFileName, 1, 2) != "~$") ; excel lock files
-				list .= A_LoopFileTimeModified . "`t" . A_LoopFileFullPath . "`n"
-
-	cores.files := []
-	names := []
-	if (list != "")
-		for i, line in StrSplit(Sort(RTrim(list, "`n"), "R"), "`n") {
-			if (i > 40)
-				break
-			path := StrSplit(line, "`t")[2]
-			SplitPath(path,,,, &name)
-			cores.files.Push(path)
-			names.Push(name)
-		}
-	cores.fileGui.Delete()
-	cores.fileGui.Add(names)
-	for i, path in cores.files
-		if (i == 1 || path == selected)
-			cores.fileGui.Choose(i)
-	updateCoresStatus()
-}
-
-; "add shortcut to onedrive" in sharepoint puts 000-Orders in the root of the work onedrive folder
-findOrdersFolder() {
-	for i, root in [EnvGet("OneDriveCommercial"), EnvGet("OneDrive")]
-		if (root != "" && DirExist(root . "\000-Orders")) {
-			setCoreFolder(root . "\000-Orders")
-			return
-		}
-}
-
-setCoreFolder(folder) {
-	coreData.folder.value := folder
-	IniWrite(folder, "config.ini", "cores", "folder")
-}
-
-onCoresFolder(*) {
-	start := (coreData.folder.value != "") ? coreData.folder.value : EnvGet("OneDriveCommercial")
-	folder := FileSelect("D", start, "Choose the synced 000-Orders folder")
-	if (folder == "")
-		return
-	setCoreFolder(folder)
-	refreshCoreFiles()
-}
-
-onCoresLoad(*) {
+; the log sheet is picked from the onedrive synced 000-Orders folder (no excel on the core label computer),
+; which is too big to search, so the file picker just starts there
+onCoresOpen(*) {
 	flushLogoClick()
-	if (cores.fileGui.Value == 0) {
-		if (coreData.folder.value == "")
-			return MsgBox("Press … to choose the synced 000-Orders folder.`n`nIn SharePoint, 'Add shortcut to OneDrive' on 000-Orders puts it in File Explorer.")
-		return MsgBox("No log sheets found in:`n" . coreData.folder.value . "`n`nPress ↻ to search again, or … to choose another folder.")
-	}
-	try list := readCoreList(cores.files[cores.fileGui.Value])
+	start := ordersFolder()
+	path := FileSelect(3, (start != "") ? start . "\" : "", "Choose the order's Log Sheet", "Log sheets (*.xlsx)")
+	if (path == "")
+		return
+	coreData.folder.value := pickerFolderFor(path)
+	IniWrite(coreData.folder.value, "config.ini", "cores", "folder")
+	loadCoreFile(path)
+}
+
+onCoresReload(*) {
+	flushLogoClick()
+	if (coreData.file.value == "")
+		return MsgBox("Press open to choose the order's Log Sheet.")
+	loadCoreFile(coreData.file.value)
+}
+
+loadCoreFile(path) {
+	try list := readCoreList(path)
 	catch as e
 		return MsgBox("Could not read the log sheet:`n`n" . e.Message)
+	coreData.file.value := path
+	IniWrite(path, "config.ini", "cores", "file")
+	updateFileText()
 	loadCoreRows(list.rows, list.customer)
+}
+
+updateFileText() {
+	SplitPath(coreData.file.value,,,, &name)
+	cores.fileGui.Value := (name != "") ? name : "no log sheet opened"
+}
+
+; where the file picker starts: the saved folder, else 000-Orders in the work onedrive folder
+; ("add shortcut to onedrive" in sharepoint puts it there)
+ordersFolder() {
+	if (coreData.folder.value != "" && DirExist(coreData.folder.value))
+		return coreData.folder.value
+	for i, root in [EnvGet("OneDriveCommercial"), EnvGet("OneDrive")]
+		if (root != "" && DirExist(root . "\000-Orders"))
+			return root . "\000-Orders"
+	return ""
+}
+
+; next time start in 000-Orders when the log sheet was in it, otherwise in the log sheet's folder
+pickerFolderFor(path) {
+	if RegExMatch(path, "i)^(.*\\000-Orders)\\", &match)
+		return match[1]
+	SplitPath(path,, &dir)
+	return dir
 }
 
 ; an .xlsx is a zip of xml files, tar.exe comes with windows 10 and newer
