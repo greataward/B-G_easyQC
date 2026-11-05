@@ -9,6 +9,7 @@ Fills the b&g core label csv straight from the order's log sheet, using the `con
 3. Click the b&g logo to print. About 1.5 seconds after each click easyQC marks that roll as sent and writes the next checked roll, so just keep clicking the logo.
 
 - **↻** searches the folder again (do this to see log sheets added since easyQC started)
+- the **all** box checks or unchecks every roll at once (it's gray when only some are checked)
 - **double-click** a roll to write only that roll (e.g. to reprint it with your initials)
 - **back** writes the previous roll again so the next logo click reprints it
 - **pause** ignores logo clicks until you press **resume**

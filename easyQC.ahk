@@ -157,6 +157,8 @@ cores := {
 	pendingClick: false,
 	logoStep: 0,
 	logoCountdown: 0,
+	allState: 0,     ; the all box: 1 every roll checked, 0 none, -1 some
+	bulkCheck: false,
 }
 
 csv := { }
@@ -727,12 +729,15 @@ setupCoresTab(tabNum) {
 
 	; ==== ROLLS ====
 	myGui.AddGroupBox("xs w330 h238 cBlue Section", "rolls")
-	cores.infoGui := myGui.AddText("xs+10 ys+20 w310 cGray", "no log sheet loaded")
+	cores.allGui := myGui.AddCheckbox("xs+11 ys+19 Check3 -TabStop", "all")
+	cores.allGui.OnEvent("Click", onCoresCheckAll)
+	cores.infoGui := myGui.AddText("x+10 yp+1 w245 cGray", "no log sheet loaded")
 	myGui.SetFont("s9", "Arial")
 	cores.listGui := myGui.AddListView("xs+5 y+4 w320 h150 Checked -Multi Grid", ["", "UPC", "Roll", "Qty", "Sent"])
-	for col, width in [30, 110, 36, 42, 78]
+	for col, width in [34, 110, 34, 40, 78]
 		cores.listGui.ModifyCol(col, width)
 	cores.listGui.OnEvent("DoubleClick", onCoresDoubleClick)
+	cores.listGui.OnEvent("ItemCheck", onCoresItemCheck)
 	myGui.SetFont("s10", "Courier New")
 
 	myGui.AddText("xs+10 y+10", "QC By:")
@@ -1242,12 +1247,15 @@ loadCoreRows(values, customer) {
 
 	lv := cores.listGui
 	lv.Opt("-Redraw")
+	cores.bulkCheck := true
 	lv.Delete()
 	for i, row in cores.rows {
 		sent := IniRead("config.ini", coresSection(), row.key, "")
 		lv.Add(sent == "" ? "Check" : "", "", row.upc, row.roll, row.qty, sentText(sent))
 	}
+	cores.bulkCheck := false
 	lv.Opt("+Redraw")
+	updateCheckAll()
 	cores.infoGui.Value := Format("{}   {}   {} rolls", cores.order, cores.customer, cores.rows.Length)
 	updateCoresStatus()
 }
@@ -1303,6 +1311,32 @@ onCoresPause(*) {
 	updateCoresStatus()
 }
 
+onCoresCheckAll(*) {
+	check := (cores.allState != 1) ; when only some rolls are checked, check them all
+	cores.bulkCheck := true
+	Loop cores.listGui.GetCount()
+		cores.listGui.Modify(A_Index, check ? "Check" : "-Check")
+	cores.bulkCheck := false
+	updateCheckAll()
+	updateCoresStatus()
+}
+
+onCoresItemCheck(*) {
+	if (cores.bulkCheck)
+		return
+	updateCheckAll()
+	updateCoresStatus()
+}
+
+; the all box is checked when every roll is, gray when only some are
+updateCheckAll() {
+	total := cores.listGui.GetCount(), checked := 0, i := 0
+	while (i := cores.listGui.GetNext(i, "Checked"))
+		checked++
+	cores.allState := (total && checked == total) ? 1 : (checked ? -1 : 0)
+	cores.allGui.Value := cores.allState
+}
+
 setCoresPaused(paused) {
 	cores.paused := paused
 	cores.pauseButton.Text := paused ? "resume" : "pause"
@@ -1326,6 +1360,7 @@ writeCoreRoll(rowNum) {
 	clearCurrentCore()
 	cores.current := rowNum
 	cores.listGui.Modify(rowNum, "Check Vis", "►")
+	updateCheckAll()
 	updateCoresStatus()
 	return true
 }
@@ -1340,6 +1375,7 @@ markCoreSent(rowNum) {
 	sent := coreData.initials.gui.value . " " . A_Now
 	IniWrite(sent, "config.ini", coresSection(), cores.rows[rowNum].key)
 	cores.listGui.Modify(rowNum, "-Check Col5", sentText(sent))
+	updateCheckAll()
 }
 
 ; sent rolls are saved as "<initials> <A_Now>", shown with the time if sent today, otherwise the date
